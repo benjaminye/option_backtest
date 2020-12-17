@@ -45,10 +45,14 @@ class Option:
         -----------------------------
         Type: {self.opt_type.upper()}
         Expiry: {self.expiration}
+        DTE: {self.dte}
         Strike: {self.strike}
+        Moneyness: {self.moneyness}
         -----------------------------
         Bid: {self.bid} 
+        Mid: {self.mid}
         Ask: {self.ask}
+        Spread: {self.spread}
         IV: {self.iv}
         -----------------------------
         Open:{self.price['open']}
@@ -63,15 +67,22 @@ class Option:
         Rho: {self.greeks['rho']}
         """
 
+    @property
     def moneyness(self):
-        return self.strike / self.underlying_px
+        if self.opt_type == "call":
+            return self.underlying_px / self.strike
+        else:
+            return self.strike / self.underlying_px
 
+    @property
     def dte(self):
         return (self.expiration - self.quote_date).astype(int)
 
+    @property
     def spread(self):
         return self.ask - self.bid
 
+    @property
     def mid(self):
         return (self.bid + self.ask) / 2
 
@@ -93,7 +104,7 @@ class OptionChain:
 
         self.chain[option.expiration].append(option)
 
-    def get_approx_expiry(self, expiry: np.datetime64):
+    def filter_expiry(self, expiry: np.datetime64):
         dates = list(self.chain.keys())
         days_delta = [abs(date - expiry).astype(int) for date in dates]
 
@@ -106,7 +117,12 @@ class OptionChain:
 
         return new_chain
 
-    def get_type(self, opt_type: Literal["call", "put"]):
+    def filter_dte(self, dte: int):
+        target_expiry = self.quote_date + dte
+
+        return self.filter_expiry(target_expiry)
+
+    def filter_type(self, opt_type: Literal["call", "put"]):
         options_list = list(self.chain.values())
         options_list = [option for sublist in options_list for option in sublist]
 
@@ -118,13 +134,13 @@ class OptionChain:
 
         return new_chain
 
-    def get_approx_moneyness(self, tgt_moneyness: float):
+    def filter_moneyness(self, tgt_moneyness: float):
         new_chain = OptionChain(self.ticker, self.quote_date)
         results = []
 
         chain = copy.deepcopy(self.chain)
         for _, option_list in chain.items():
-            moneyness_list = [option.moneyness() for option in option_list]
+            moneyness_list = [option.moneyness for option in option_list]
             moneyness_delta = [
                 abs(moneyness - tgt_moneyness) for moneyness in moneyness_list
             ]
@@ -144,11 +160,13 @@ class OptionChain:
         return new_chain
 
     def get_option(self, expiry, opt_type, moneyness) -> Option:
-        result = (
-            self.get_type(opt_type)
-            .get_approx_expiry(expiry)
-            .get_approx_moneyness(moneyness)
-        )
+        result = self.filter_type(opt_type).filter_moneyness(moneyness)
+
+        if isinstance(expiry, int):
+            result = result.filter_dte(expiry)
+        else:
+            result = result.filter_expiry(expiry)
+
         return list(result.chain.values())[0][0]
 
 
@@ -193,41 +211,46 @@ class Loader:
         """
 
     def load_data(self, file_paths: list, has_header: bool):
-
         self.data = {}
         for path in file_paths:
-            with open(path, "r") as csv_file:
-                reader = csv.reader(csv_file)
+            self.__parse_file(path, has_header)
 
-                if has_header:
-                    next(reader, None)
+    def __parse_file(self, file_path, has_header):
+        with open(file_path, "r") as csv_file:
+            reader = csv.reader(csv_file)
 
-                for row in reader:
-                    parsed = self.__parse_row(row)
+            if has_header:
+                next(reader, None)
 
-                    if parsed["ticker"] not in self.data:
-                        self.data[parsed["ticker"]] = {}
+            for row in reader:
+                parsed = self.__parse_row(row)
 
-                    if parsed["quote_date"] not in self.data[parsed["ticker"]]:
-                        self.data[parsed["ticker"]][parsed["quote_date"]] = OptionChain(
-                            parsed["ticker"], parsed["quote_date"]
-                        )
+                option = Option(
+                    parsed["ticker"],
+                    parsed["quote_date"],
+                    parsed["expiration"],
+                    parsed["strike"],
+                    parsed["opt_type"],
+                    parsed["price"],
+                    parsed["bid"],
+                    parsed["ask"],
+                    parsed["underlying_px"],
+                    parsed["iv"],
+                    parsed["greeks"],
+                )
 
-                    option = Option(
-                        parsed["ticker"],
-                        parsed["quote_date"],
-                        parsed["expiration"],
-                        parsed["strike"],
-                        parsed["opt_type"],
-                        parsed["price"],
-                        parsed["bid"],
-                        parsed["ask"],
-                        parsed["underlying_px"],
-                        parsed["iv"],
-                        parsed["greeks"],
-                    )
+                self.__add_to_chain(option)
 
-                    self.data[parsed["ticker"]][parsed["quote_date"]].add_option(option)
+    def __add_to_chain(self, option):
+        ticker = option.ticker
+        quote_date = option.quote_date
+
+        if ticker not in self.data:
+            self.data[ticker] = {}
+        if quote_date not in self.data[ticker]:
+            self.data[ticker][quote_date] = OptionChain(ticker, quote_date)
+
+        self.data[ticker][quote_date].add_option(option)
 
     def __parse_row(self, row):
         parsed = {}
@@ -265,12 +288,33 @@ class Loader:
 
         return parsed
 
-    def get_chains_by_date(self, date: np.datetime64):
-        out = {}
-        for ticker in self.data:
-            out[ticker] = self.data[ticker][date]
+    def filter_quote_date(self, date: np.datetime64):
+        new_loader = Loader()
 
-        return out
+        for ticker in self.data:
+            new_loader.data[ticker] = self.data[ticker][date]
+
+        return new_loader
+
+    def find_option_by_desc(self, quote_date, ticker, expiration, opt_type, mny):
+        return self.data[ticker][quote_date].get_option(expiration, opt_type, mny)
+
+    def find_option_exact(self, quote_date, target_option):
+        ticker = target_option.ticker
+        chain = self.data[ticker][quote_date].chain[target_option.expiration]
+
+        for option in chain:
+            if [option.strike, option.opt_type] == [
+                target_option.strike,
+                target_option.opt_type,
+            ]:
+                return option
+
+    def list_dates(self):
+        ticker = list(self.data)[0]
+        date_list = list(self.data[ticker])
+
+        return date_list
 
 
 class ParseError(Exception):
