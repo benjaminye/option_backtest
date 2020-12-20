@@ -158,7 +158,7 @@ class Leg:
         if self.side == "l":
             multiplier = self.quantity * 100
         else:
-            multiplier = -1 * self.quantity * 100
+            multiplier = self.quantity * -100
 
         return multiplier
 
@@ -194,8 +194,9 @@ class Strategy:
             for leg in self.legs[1:]:
                 df += self.__construct_df(leg)
 
-        df["cummulative_real_pnl"] = df["realized_pnl"].cumsum()
-        df["cummulative_unreal_pnl"] = df["unrealized_pnl"].cumsum()
+        df["cumulative_real_pnl"] = df["realized_pnl"].cumsum()
+        df["cumulative_unreal_pnl"] = df["unrealized_pnl"].cumsum()
+        df["drawdown"] = self.__get_drawdown(df["cumulative_unreal_pnl"])
         return df
 
     def __construct_df(self, leg):
@@ -210,3 +211,7 @@ class Strategy:
         df = pd.concat([realized, unrealized, delta, gamma, theta, vega, rho], axis=1)
 
         return df
+
+    def __get_drawdown(self, series):
+        series = series.to_numpy()
+        return series - np.fmax.accumulate(series)
